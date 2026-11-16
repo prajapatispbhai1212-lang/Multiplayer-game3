@@ -1,0 +1,508 @@
+
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SP Ludo - Multiplayer Game</title>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+ font-family:Arial,sans-serif;
+ background:linear-gradient(135deg,#10172b,#263b62);
+ color:white;min-height:100vh;text-align:center;padding:15px
+}
+header{padding:15px}
+header h1{color:#ffd54a;font-size:32px}
+header p{margin-top:8px;color:#cbd5e1}
+.panel{
+ background:#ffffff12;border:1px solid #ffffff30;
+ border-radius:15px;padding:16px;margin:12px auto;
+ max-width:650px
+}
+input,button{
+ padding:12px;border:0;border-radius:8px;
+ font-size:15px;margin:5px
+}
+input{width:min(220px,90%);background:white;color:#222}
+button{background:#ffcc36;color:#222;font-weight:bold;cursor:pointer}
+button:hover{filter:brightness(1.1)}
+button:disabled{opacity:.4;cursor:not-allowed}
+#status{color:#8fffa8;margin:12px}
+#roomInfo{color:#ffd54a;font-weight:bold}
+#board{
+ display:block;width:min(94vw,560px);height:auto;
+ margin:15px auto;background:#fff;border-radius:12px;
+ box-shadow:0 5px 25px #0008;touch-action:manipulation
+}
+#dice{
+ font-size:65px;margin:10px;
+}
+#players{
+ display:flex;justify-content:center;gap:10px;flex-wrap:wrap;
+ margin:12px
+}
+.player{
+ padding:10px 15px;background:#ffffff18;
+ border-radius:10px;border:2px solid transparent
+}
+.player.active{border-color:#ffd54a}
+#tokens{display:flex;justify-content:center;flex-wrap:wrap}
+#tokens button{background:#fff}
+.small{font-size:13px;color:#cbd5e1;margin-top:10px}
+.hidden{display:none}
+</style>
+</head>
+
+<body>
+
+<header>
+<h1>🎲 SP LUDO</h1>
+<p>Real-Time Online Multiplayer Ludo Game</p>
+</header>
+
+<div class="panel" id="connectionPanel">
+<h3>🌐 Online Multiplayer</h3>
+<p class="small">नया गेम बनाएं या Player ID से जुड़ें।</p>
+<br>
+<button onclick="createRoom()">➕ Create Room</button>
+<br>
+<input id="playerName" placeholder="अपना नाम लिखें" maxlength="15">
+<br>
+<input id="roomId" placeholder="Enter Player ID">
+<button onclick="joinRoom()">Join Game</button>
+<p id="status">Connecting...</p>
+<p id="roomInfo"></p>
+<button id="copyBtn" class="hidden" onclick="copyID()">Copy Player ID</button>
+</div>
+
+<div id="gamePanel" class="hidden">
+
+<div class="panel">
+<h3>🎮 Game Room</h3>
+<p id="gameRoom"></p>
+<p id="turnInfo">Waiting for players...</p>
+<div id="players"></div>
+</div>
+
+<canvas id="board" width="600" height="600"></canvas>
+
+<div class="panel">
+<h2>🎲 Dice</h2>
+<div id="dice">🎲</div>
+<button id="rollBtn" onclick="rollDice()">ROLL DICE</button>
+<p id="message">अपनी बारी का इंतजार करें।</p>
+<div id="tokens"></div>
+</div>
+
+<button onclick="leaveGame()">Leave Game</button>
+</div>
+
+<script>
+const COLORS=["#e53935","#159447","#f2bd16","#2477dc"];
+const COLOR_NAMES=["Red","Green","Yellow","Blue"];
+const DICE=["⚀","⚁","⚂","⚃","⚄","⚅"];
+
+const canvas=document.getElementById("board");
+const ctx=canvas.getContext("2d");
+
+let peer=null;
+let connections=[];
+let host=false;
+let myId="";
+let myIndex=-1;
+let game=null;
+let diceValue=0;
+let connected=false;
+
+const path=[];
+
+// 52-cell outer track
+for(let c=0;c<14;c++) path.push([0,c]);
+for(let r=1;r<14;r++) path.push([r,13]);
+for(let c=12;c>=0;c--) path.push([13,c]);
+for(let r=12;r>=1;r--) path.push([r,0]);
+
+const STARTS=[7,20,33,46];
+
+const HOME=[
+ [[1,7],[2,7],[3,7],[4,7],[5,7]],
+ [[7,12],[7,11],[7,10],[7,9],[7,8]],
+ [[12,6],[11,6],[10,6],[9,6],[8,6]],
+ [[6,1],[6,2],[6,3],[6,4],[6,5]]
+];
+
+const SAFE=[0,8,13,21,26,34,39,47];
+
+function say(text){
+ document.getElementById("status").innerText=text;
+}
+
+function createRoom(){
+ const name=getName();
+ if(!name)return;
+
+ peer=new Peer();
+
+ peer.on("open",id=>{
+  host=true;
+  myId=id;
+  myIndex=0;
+  game={
+   players:[newPlayer(id,name,0)],
+   turn:0,
+   dice:0,
+   rolled:false,
+   winner:null
+  };
+
+  showGame();
+  say("Room created successfully!");
+  document.getElementById("roomInfo").innerText="Your Player ID: "+id;
+  document.getElementById("copyBtn").classList.remove("hidden");
+
+  peer.on("connection",conn=>{
+   conn.on("open",()=>{
+    if(game.players.length>=4){
+     conn.send({type:"FULL"});
+     conn.close();
+     return;
+    }
+    if(game.players.some(p=>p.id===conn.peer))return;
+
+    const index=game.players.length;
+    game.players.push(newPlayer(conn.peer,"Player "+(index+1),index));
+    connections.push(conn);
+
+    conn.on("data",data=>handleCommand(data,conn));
+    broadcast();
+   });
+  });
+
+  broadcast();
+ });
+ peer.on("error",e=>say("Connection error: "+e.type));
+}
+
+function joinRoom(){
+ const name=getName();
+ const id=document.getElementById("roomId").value.trim();
+ if(!name||!id)return say("Player ID डालें।");
+
+ peer=new Peer();
+
+ peer.on("open",()=>{
+  const conn=peer.connect(id,{reliable:true});
+  connections=[conn];
+
+  conn.on("open",()=>{
+   myId=peer.id;
+   connected=true;
+   say("Room से जुड़ गए!");
+   conn.send({type:"JOIN",name:name});
+  });
+
+  conn.on("data",data=>{
+   if(data.type==="FULL"){
+    say("Room is full!");
+    return;
+   }
+   if(data.type==="STATE"){
+    game=data.state;
+    myIndex=game.players.findIndex(p=>p.id===myId);
+    if(myIndex>=0){
+     showGame();
+     render();
+    }
+   }
+  });
+
+  conn.on("close",()=>say("Host disconnected."));
+  conn.on("error",()=>say("Connection failed."));
+ });
+ peer.on("error",e=>say("Error: "+e.type));
+}
+
+function getName(){
+ const name=document.getElementById("playerName").value.trim();
+ if(!name){say("अपना नाम लिखें।");return null;}
+ return name;
+}
+
+function newPlayer(id,name,index){
+ return {
+  id:id,name:name,color:COLORS[index],
+  colorName:COLOR_NAMES[index],
+  start:STARTS[index],
+  tokens:[-1,-1,-1,-1]
+ };
+}
+
+function showGame(){
+ document.getElementById("connectionPanel").classList.add("hidden");
+ document.getElementById("gamePanel").classList.remove("hidden");
+ document.getElementById("gameRoom").innerText="Room ID: "+(host?myId:document.getElementById("roomId").value);
+ render();
+}
+
+function sendCommand(data){
+ if(host){
+  handleCommand(data,null);
+ }else if(connections[0]&&connections[0].open){
+  connections[0].send(data);
+ }
+}
+
+function handleCommand(data,conn){
+ if(!host||!game)return;
+
+ if(data.type==="JOIN"){
+  const p=game.players.find(x=>x.id===conn.peer);
+  if(p)p.name=data.name.slice(0,15);
+  broadcast();
+ }
+
+ if(data.type==="ROLL"){
+  if(data.id!==game.players[game.turn].id)return;
+  if(game.rolled||game.winner)return;
+
+  game.dice=Math.floor(Math.random()*6)+1;
+  game.rolled=true;
+  broadcast();
+ }
+
+ if(data.type==="MOVE"){
+  if(data.id!==game.players[game.turn].id)return;
+  if(!game.rolled||data.token<0||data.token>3)return;
+
+  const p=game.players[game.turn];
+  const old=p.tokens[data.token];
+  const value=old===-1?(game.dice===6?0:-1):old+game.dice;
+
+  if(value<0||value>56)return;
+
+  p.tokens[data.token]=value;
+
+  // Capture opponent tokens
+  if(value<51){
+   const position=(p.start+value)%52;
+   if(!SAFE.includes(position)){
+    game.players.forEach((other,i)=>{
+     if(i===game.turn)return;
+     other.tokens=other.tokens.map(t=>{
+      if(t>=0&&t<51&&(other.start+t)%52===position)return -1;
+      return t;
+     });
+    });
+   }
+  }
+
+  // Check winner
+  if(p.tokens.every(t=>t===56)){
+   game.winner=p.name;
+  }
+
+  const six=game.dice===6;
+  game.rolled=false;
+  game.dice=0;
+
+  if(!six&&!game.winner){
+   game.turn=(game.turn+1)%game.players.length;
+  }
+
+  broadcast();
+ }
+}
+
+function broadcast(){
+ if(!game)return;
+ const packet={type:"STATE",state:game};
+ render();
+ connections.forEach(c=>{
+  if(c.open)c.send(packet);
+ });
+}
+
+function rollDice(){
+ if(!game||myIndex!==game.turn)return;
+ if(game.rolled)return;
+ sendCommand({type:"ROLL",id:myId});
+}
+
+function moveToken(index){
+ if(!game||myIndex!==game.turn||!game.rolled)return;
+
+ const p=game.players[myIndex];
+ const old=p.tokens[index];
+ const next=old===-1?(game.dice===6?0:-1):old+game.dice;
+
+ if(next<0||next>56){
+  document.getElementById("message").innerText="इस गोटी की चाल संभव नहीं है।";
+  return;
+ }
+ sendCommand({type:"MOVE",id:myId,token:index});
+}
+
+function render(){
+ if(!game)return;
+
+ drawBoard();
+
+ const current=game.players[game.turn];
+ document.getElementById("turnInfo").innerText=
+ game.winner?"🏆 Winner: "+game.winner:
+ "Current Turn: "+current.name;
+
+ document.getElementById("dice").innerText=
+ game.dice?DICE[game.dice-1]:"🎲";
+
+ document.getElementById("rollBtn").disabled=
+ game.winner||myIndex!==game.turn||game.rolled;
+
+ document.getElementById("players").innerHTML=
+ game.players.map((p,i)=>`
+ <div class="player ${i===game.turn?'active':''}">
+ <span style="color:${p.color}">●</span>
+ ${escapeHTML(p.name)}
+ <br><small>${p.tokens.filter(t=>t===56).length}/4 Home</small>
+ </div>`).join("");
+
+ const movable=game.rolled&&myIndex===game.turn;
+ document.getElementById("tokens").innerHTML=
+ movable?game.players[myIndex].tokens.map((t,i)=>{
+  const next=t===-1?(game.dice===6?0:-1):t+game.dice;
+  const valid=next>=0&&next<=56;
+  return `<button ${valid?"":"disabled"} onclick="moveToken(${i})">
+  Token ${i+1} ${t===-1?"(Home)":t===56?"(Finished)":""}
+  </button>`;
+ }).join(""):"";
+
+ document.getElementById("message").innerText=
+ game.winner?"🏆 "+game.winner+" जीत गए!":
+ movable?"अपनी गोटी चुनें।":
+ myIndex===game.turn?"पासा फेंकें।":
+ "दूसरे खिलाड़ी की बारी है।";
+}
+
+function escapeHTML(s){
+ return String(s).replace(/[&<>"']/g,c=>({
+ "&":"&amp;","<":"&lt;",">":"&gt;",
+ '"':"&quot;","'":"&#39;"
+ })[c]);
+}
+
+function cell(x,y){
+ const size=600/15;
+ ctx.fillRect(x*size,y*size,size-1,size-1);
+ ctx.strokeRect(x*size,y*size,size-1,size-1);
+}
+
+function center(x,y){
+ const size=600/15;
+ return [(x+.5)*size,(y+.5)*size];
+}
+
+function drawBoard(){
+ ctx.clearRect(0,0,600,600);
+ const s=40;
+
+ // Background
+ ctx.fillStyle="#fff";ctx.fillRect(0,0,600,600);
+
+ // Four home bases
+ const bases=[
+  [0,0,"#e53935"],[9,0,"#159447"],
+  [9,9,"#f2bd16"],[0,9,"#2477dc"]
+ ];
+
+ bases.forEach(([x,y,color])=>{
+  ctx.fillStyle=color;
+  ctx.fillRect(x*s,y*s,6*s,6*s);
+  ctx.fillStyle="#fff";
+  ctx.fillRect((x+1)*s,(y+1)*s,4*s,4*s);
+  ctx.fillStyle=color;
+  [[2,2],[4,2],[2,4],[4,4]].forEach(([a,b])=>{
+   ctx.beginPath();
+   ctx.arc((x+a+.5)*s,(y+b+.5)*s,12,0,Math.PI*2);
+   ctx.fill();
+  });
+ });
+
+ // Outer track
+ path.forEach(([r,c],i)=>{
+  const [x,y]=center(c,r);
+  const owner=STARTS.indexOf(i);
+  ctx.fillStyle=owner>=0?COLORS[owner]:"#eeeeee";
+  ctx.fillRect(c*s,r*s,s-1,s-1);
+  ctx.strokeStyle="#aaa";ctx.strokeRect(c*s,r*s,s-1,s-1);
+ });
+
+ // Home lanes
+ HOME.forEach((lane,i)=>{
+  lane.forEach(([r,c])=>{
+   ctx.fillStyle=COLORS[i];
+   ctx.fillRect(c*s,r*s,s-1,s-1);
+  });
+ });
+
+ // Center
+ ctx.fillStyle="#f5f5f5";
+ ctx.beginPath();
+ ctx.moveTo(300,220);ctx.lineTo(380,300);
+ ctx.lineTo(300,380);ctx.lineTo(220,300);
+ ctx.closePath();ctx.fill();
+ ctx.fillStyle="#e53935";
+ ctx.beginPath();ctx.moveTo(300,220);ctx.lineTo(300,300);ctx.lineTo(220,300);ctx.fill();
+ ctx.fillStyle="#159447";
+ ctx.beginPath();ctx.moveTo(300,220);ctx.lineTo(380,300);ctx.lineTo(300,300);ctx.fill();
+ ctx.fillStyle="#f2bd16";
+ ctx.beginPath();ctx.moveTo(380,300);ctx.lineTo(300,380);ctx.lineTo(300,300);ctx.fill();
+ ctx.fillStyle="#2477dc";
+ ctx.beginPath();ctx.moveTo(300,380);ctx.lineTo(220,300);ctx.lineTo(300,300);ctx.fill();
+
+ // Tokens
+ game.players.forEach((p,pi)=>{
+  p.tokens.forEach((t,ti)=>{
+   let pos;
+   if(t===-1){
+    const bx=[2,11,11,2][pi];
+    const by=[2,2,11,11][pi];
+    const offsets=[[-.25,-.25],[.25,-.25],[-.25,.25],[.25,.25]];
+    pos=center(bx+offsets[ti][0],by+offsets[ti][1]);
+   }else if(t===56){
+    pos=center(7,7);
+   }else if(t>=51){
+    const [r,c]=HOME[pi][t-51];
+    pos=center(c,r);
+   }else{
+    const [r,c]=path[(p.start+t)%52];
+    pos=center(c,r);
+   }
+
+   ctx.beginPath();
+   ctx.arc(pos[0],pos[1],12,0,Math.PI*2);
+   ctx.fillStyle=p.color;ctx.fill();
+   ctx.lineWidth=3;ctx.strokeStyle="#222";ctx.stroke();
+   ctx.fillStyle="#fff";ctx.font="bold 11px Arial";
+   ctx.textAlign="center";ctx.textBaseline="middle";
+   ctx.fillText(String(ti+1),pos[0],pos[1]);
+  });
+ });
+}
+
+function copyID(){
+ if(myId)navigator.clipboard.writeText(myId)
+ .then(()=>say("Player ID copied!"))
+ .catch(()=>say("Copy नहीं हुआ, ID manually copy करें।"));
+}
+
+function leaveGame(){
+ if(peer)peer.destroy();
+ location.reload();
+}
+</script>
+</body>
+</html>
